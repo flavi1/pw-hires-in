@@ -1,0 +1,38 @@
+# Intégration continue : à chaque push et pull request.
+# Pas de matériel audio ici : configuration, fichiers générés et vrai pare-feu
+# (dans un espace réseau isolé).
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: ShellCheck + Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Syntaxe bash + ShellCheck
+        run: |
+          for f in install.sh tests/*.sh; do bash -n "$f"; done
+          shellcheck -S warning install.sh tests/*.sh
+      - name: Python (compilation + pyflakes)
+        run: |
+          python3 -m py_compile files/bin/rock-n-roll-pw-in tests/test-firewall.py
+          pipx run pyflakes files/bin/rock-n-roll-pw-in tests/test-firewall.py
+
+  config:
+    name: Configuration et pare-feu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - name: Outils (spa-json-dump si disponible, nftables)
+        run: sudo apt-get update && sudo apt-get install -y nftables && (sudo apt-get install -y pipewire-bin || true)
+      - run: bash tests/test-config.sh
+      - name: "Pare-feu : un seul émetteur, réseau local (vrais paquets, espace réseau isolé)"
+        run: sudo python3 tests/test-firewall.py

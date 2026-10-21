@@ -1,0 +1,424 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-3.0-or-later
+# =============================================================================
+#  rock-n-roll-pw-in — réception du son par le réseau sur la Raspberry Pi
+#
+#  Configuration : /etc/rock-n-roll-pw-in/pw-in.conf (+ local.conf)
+#
+#  sudo rock-n-roll-pw-in apply      génère et (re)démarre le récepteur RTP,
+#                                    met à jour le pare-feu
+#  sudo rock-n-roll-pw-in status     récepteur, émetteur en cours, flux
+#  rock-n-roll-pw-in check           valide la configuration
+#  rock-n-roll-pw-in generate DIR    écrit les fichiers générés dans DIR (tests)
+#
+#  Le récepteur tourne dans un processus PipeWire à part (service utilisateur
+#  rock-n-roll-rtp) : le relancer ne touche jamais au reste de la pile audio.
+#  Un seul émetteur à la fois : assuré par le pare-feu (ensemble nftables à une
+#  seule place, libérée quelques secondes après le dernier paquet).
+# =============================================================================
+import configparser
+import json
+import os
+import pwd
+import re
+import subprocess
+import sys
+
+CONF = os.environ.get("PW_IN_CONF", "/etc/rock-n-roll-pw-in/pw-in.conf")
+SOUND_CONF = os.environ.get("PW_IN_SOUND_CONF", "/etc/pi-sound-server/audio-hub.conf")
+NFT_FRAGMENT = "/etc/nftables.d/30-rock-n-roll-pw-in.nft"
+UNIT = "rock-n-roll-rtp.service"
+PW_CONF_NAME = "rock-n-roll-rtp.conf"
+NODE_NAME = "rock-n-roll.rtp"
+NFT_SET = "rnr_rtp_sender"
+HEADER = ("# Généré par « rock-n-roll-pw-in apply » depuis %s\n"
+          "# NE PAS ÉDITER : modifiez le fichier source puis relancez « sudo rock-n-roll-pw-in apply ».\n\n")
+
+DEFAULTS = {
+    "global": {"user": "auto", "target": "auto", "resample.quality": "auto"},
+    "rtp": {"enabled": "yes", "port": "46000", "latency-ms": "10", "rate": "192000",
+            "format": "S24BE", "channels": "2", "release-seconds": "5",
+            "description": "Réseau (RTP)"},
+}
+RATES = (44100, 48000, 88200, 96000, 176400, 192000)
+FORMATS = ("S16BE", "S24BE")
+
+
+def die(msg):
+    print("rock-n-roll-pw-in : " + msg, file=sys.stderr)
+    sys.exit(1)
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def yes(v):
+    return str(v).strip().lower() in ("1", "yes", "true", "on", "oui")
+
+
+def read_ini(path):
+    cp = configparser.ConfigParser(interpolation=None, strict=True)
+    cp.optionxform = str
+    # local.conf : réglages propres à la machine, lus en dernier (illisible : ignoré)
+    cp.read([path, os.path.join(os.path.dirname(path), "local.conf")], encoding="utf-8")
+    return cp
+
+
+class Config:
+    def __init__(self, path=CONF, sound_path=SOUND_CONF):
+        if not os.path.exists(path):
+            die("fichier introuvable : " + path)
+        try:
+            cp = read_ini(path)
+        except configparser.Error as e:
+            die("erreur de syntaxe dans %s :\n%s" % (path, e))
+        self.path = path
+        self.v = {s: dict(d) for s, d in DEFAULTS.items()}
+        for sec in cp.sections():
+            if sec not in self.v:
+                die("section inconnue : [%s]" % sec)
+            for k, val in cp.items(sec):
+                if k not in self.v[sec]:
+                    die("[%s] option inconnue : %s" % (sec, k))
+                self.v[sec][k] = val.strip()
+        # valeurs « auto » : reprises de pi-sound-server s'il est installé
+        sound = {}
+        if os.path.exists(sound_path):
+            try:
+                sp = read_ini(sound_path)
+                if sp.has_section("global"):
+                    sound = dict(sp.items("global"))
+            except configparser.Error:
+                pass
+        g = self.v["global"]
+        self.user = sound.get("user", "hifi") if g["user"] == "auto" else g["user"]
+        self.target = sound.get("master.name", "MASTER") if g["target"] == "auto" else g["target"]
+        q = sound.get("resample.quality", "10") if g["resample.quality"] == "auto" else g["resample.quality"]
+        r = self.v["rtp"]
+        for k, lo, hi in (("port", 1024, 65535), ("latency-ms", 1, 2000), ("channels", 1, 8),
+                          ("release-seconds", 1, 3600)):
+            if not r[k].isdigit() or not lo <= int(r[k]) <= hi:
+                die("[rtp] %s doit être un entier entre %d et %d" % (k, lo, hi))
+        if not r["rate"].isdigit() or int(r["rate"]) not in RATES:
+            die("[rtp] rate doit valoir %s" % ", ".join(map(str, RATES)))
+        if r["format"] not in FORMATS:
+            die("[rtp] format doit valoir %s" % " ou ".join(FORMATS))
+        if not q.isdigit() or not 0 <= int(q) <= 14:
+            die("resample.quality doit être un entier de 0 à 14")
+        self.quality = int(q)
+        try:
+            pw = pwd.getpwnam(self.user)
+            self.uid, self.gid, self.home = pw.pw_uid, pw.pw_gid, pw.pw_dir
+        except KeyError:
+            self.uid, self.gid, self.home = None, None, "/home/" + self.user
+
+    @property
+    def rtp(self):
+        return self.v["rtp"]
+
+    @property
+    def rtp_enabled(self):
+        return yes(self.rtp["enabled"])
+
+
+# --- SPA-JSON (format des fichiers PipeWire) ----------------------------------------
+def spa(v, ind=0):
+    pad, pad2 = "    " * ind, "    " * (ind + 1)
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, (int, float)):
+        return repr(v)
+    if isinstance(v, str):
+        return json.dumps(v, ensure_ascii=False)
+    if isinstance(v, list):
+        if all(not isinstance(x, (dict, list)) for x in v):
+            return "[ " + " ".join(spa(x) for x in v) + " ]"
+        return "[\n" + "".join(pad2 + spa(x, ind + 1) + "\n" for x in v) + pad + "]"
+    if isinstance(v, dict):
+        out = "{\n"
+        for k, x in v.items():
+            key = k if re.fullmatch(r"[A-Za-z0-9_.\-]+", k) else json.dumps(k)
+            out += "%s%s = %s\n" % (pad2, key, spa(x, ind + 1))
+        return out + pad + "}"
+    raise TypeError(v)
+
+
+def positions(n):
+    return ["FL", "FR"] if n == 2 else (["MONO"] if n == 1 else ["AUX%d" % i for i in range(n)])
+
+
+def gen_pw_conf(c):
+    """Configuration du processus PipeWire séparé qui héberge le récepteur RTP."""
+    r = c.rtp
+    doc = {
+        "context.properties": {"log.level": 0},
+        "context.spa-libs": {
+            "audio.convert.*": "audioconvert/libspa-audioconvert",
+            "support.*": "support/libspa-support",
+        },
+        "context.modules": [
+            {"name": "libpipewire-module-rt", "args": {}, "flags": ["ifexists", "nofail"]},
+            {"name": "libpipewire-module-protocol-native"},
+            {"name": "libpipewire-module-client-node"},
+            {"name": "libpipewire-module-adapter"},
+            {"name": "libpipewire-module-rtp-source",
+             "args": {
+                 "source.ip": "0.0.0.0",          # flux unicast adressé à la Pi
+                 "source.port": int(r["port"]),
+                 "sess.latency.msec": int(r["latency-ms"]),
+                 # Le pare-feu n'admet qu'un émetteur : on accepte un nouvel
+                 # identifiant de flux (PC redémarré) sans attendre.
+                 "sess.ignore-ssrc": True,
+                 "sess.media": "audio",
+                 "audio.format": r["format"],
+                 "audio.rate": int(r["rate"]),
+                 "audio.channels": int(r["channels"]),
+                 "audio.position": positions(int(r["channels"])),
+                 "stream.props": {
+                     "node.name": NODE_NAME,
+                     "node.description": r["description"],
+                     "media.name": r["description"],
+                     "application.name": r["description"],
+                     "target.object": c.target,
+                     "resample.quality": c.quality,
+                     # traiter même sans émetteur : le flux reste en place
+                     "node.always-process": True,
+                 },
+             }},
+        ],
+    }
+    return HEADER % c.path + "".join("%s = %s\n\n" % (k, spa(v)) for k, v in doc.items())
+
+
+def gen_unit(c):
+    return """# Généré par rock-n-roll-pw-in
+# Récepteur RTP dans un processus PipeWire à part : il peut être relancé sans
+# toucher au reste de la pile audio. Suit les redémarrages de PipeWire.
+[Unit]
+Description=rock-n-roll : réception RTP (port {port})
+After=pipewire.service wireplumber.service
+Requires=pipewire.service
+PartOf=pipewire.service
+
+[Service]
+ExecStart=/usr/bin/pipewire -c {conf}
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=default.target
+""".format(port=c.rtp["port"], conf=PW_CONF_NAME)
+
+
+def gen_nft(c):
+    """Fragment de pare-feu (pi-server) : réseau local, UN SEUL émetteur à la fois.
+    L'ensemble n'a qu'une place ; chaque paquet de l'émetteur en place renouvelle
+    son délai ; un autre émetteur est rejeté (ensemble plein) jusqu'à
+    release-seconds après le dernier paquet du premier."""
+    r = c.rtp
+    return ("# rock-n-roll-pw-in — RTP : réseau local, un seul émetteur à la fois\n"
+            "add set inet filter {s} {{ type ipv4_addr; size 1; flags dynamic,timeout; timeout {t}s; }}\n"
+            "add rule inet filter input ip saddr $LAN4 udp dport {p} update @{s} {{ ip saddr }} accept\n"
+            ).format(s=NFT_SET, t=r["release-seconds"], p=r["port"])
+
+
+def generated_user_files(c):
+    """chemin relatif au HOME -> contenu"""
+    return {
+        ".config/pipewire/" + PW_CONF_NAME: gen_pw_conf(c),
+        ".config/systemd/user/" + UNIT: gen_unit(c),
+    }
+
+
+# --- exécution en tant qu'utilisateur audio --------------------------------------------
+def user_env(c):
+    env = dict(os.environ)
+    env["XDG_RUNTIME_DIR"] = "/run/user/%d" % c.uid
+    env["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/%d/bus" % c.uid
+    return env
+
+
+def systemctl_user(c, *args):
+    if os.geteuid() == c.uid:
+        cmd = ["systemctl", "--user"] + list(args)
+    else:
+        cmd = ["systemctl", "--user", "-M", "%s@" % c.user] + list(args)
+    return subprocess.run(cmd, text=True, capture_output=True)
+
+
+def as_user(c, cmd, timeout=20):
+    full = cmd if os.geteuid() == c.uid else ["runuser", "-u", c.user, "--"] + cmd
+    try:
+        return subprocess.run(full, env=user_env(c), text=True, capture_output=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(full, 124, "", "délai dépassé")
+
+
+def write_owned(path, content, c, mode=0o644):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    # dossiers créés sous le HOME : propriétaire = l'utilisateur audio
+    while d.startswith(c.home + "/"):
+        os.chown(d, c.uid, c.gid)
+        d = os.path.dirname(d)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    os.chmod(path, mode)
+    os.chown(path, c.uid, c.gid)
+
+
+def firewall_present():
+    try:
+        return os.path.exists("/etc/nftables.d/00-lan.nft") and \
+            "nftables.d/[1-9]" in open("/etc/nftables.conf").read()
+    except OSError:
+        return False
+
+
+def reload_firewall():
+    r = subprocess.run(["nft", "-c", "-f", "/etc/nftables.conf"], text=True, capture_output=True)
+    if r.returncode != 0:
+        log("  pare-feu NON rechargé (erreur) :\n" + r.stderr)
+        return False
+    subprocess.run(["systemctl", "restart", "nftables"])
+    if subprocess.run(["systemctl", "is-active", "--quiet", "fail2ban"]).returncode == 0:
+        subprocess.run(["systemctl", "restart", "fail2ban"])
+    return True
+
+
+# --- commandes -----------------------------------------------------------------------------
+def cmd_check(c):
+    r = c.rtp
+    print("Configuration valide : %s" % c.path)
+    print("  utilisateur : %s ; sortie : %s ; qualité : %d" % (c.user, c.target, c.quality))
+    if c.rtp_enabled:
+        print("  RTP         : port UDP %s, %s Hz %s %s canaux, tampon %s ms, place libérée après %s s" % (
+            r["port"], r["rate"], r["format"], r["channels"], r["latency-ms"], r["release-seconds"]))
+    else:
+        print("  RTP         : désactivé")
+
+
+def cmd_generate(c, outdir):
+    for rel, content in generated_user_files(c).items():
+        p = os.path.join(outdir, rel)
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        open(p, "w", encoding="utf-8").write(content)
+        print("écrit", p)
+    p = os.path.join(outdir, "nftables.d", os.path.basename(NFT_FRAGMENT))
+    os.makedirs(os.path.dirname(p), exist_ok=True)
+    open(p, "w", encoding="utf-8").write(gen_nft(c))
+    print("écrit", p)
+
+
+def cmd_apply(c):
+    if os.geteuid() != 0:
+        die("« apply » doit être lancé avec sudo")
+    if c.uid is None:
+        die("l'utilisateur « %s » n'existe pas : installez d'abord pi-sound-server" % c.user)
+    cmd_check(c)
+    for rel, content in generated_user_files(c).items():
+        p = os.path.join(c.home, rel)
+        write_owned(p, content, c)
+        log("  écrit " + p)
+    systemctl_user(c, "daemon-reload")
+    if c.rtp_enabled:
+        systemctl_user(c, "enable", UNIT)
+        r = systemctl_user(c, "restart", UNIT)
+        log("  %s : %s" % (UNIT, "démarré" if r.returncode == 0 else "ÉCHEC (" + r.stderr.strip() + ")"))
+    else:
+        systemctl_user(c, "disable", "--now", UNIT)
+        log("  %s : arrêté" % UNIT)
+    # pare-feu
+    if firewall_present():
+        if c.rtp_enabled:
+            want = gen_nft(c)
+            old = open(NFT_FRAGMENT).read() if os.path.exists(NFT_FRAGMENT) else None
+            if old != want:
+                open(NFT_FRAGMENT, "w").write(want)
+                log("  pare-feu : port UDP %s, réseau local, un seul émetteur" % c.rtp["port"])
+                reload_firewall()
+        elif os.path.exists(NFT_FRAGMENT):
+            os.remove(NFT_FRAGMENT)
+            log("  pare-feu : port RTP refermé")
+            reload_firewall()
+    elif c.rtp_enabled:
+        log("  ATTENTION : pas de pare-feu pi-server : le port UDP %s n'est pas filtré et "
+            "plusieurs émetteurs pourraient se mélanger" % c.rtp["port"])
+
+
+def receiving_state(c):
+    """(nœud présent ?, rtp.receiving) depuis pw-dump."""
+    r = as_user(c, ["pw-dump"])
+    if r.returncode != 0:
+        return None, None
+    try:
+        objs = json.loads(r.stdout)
+    except ValueError:
+        return None, None
+    for o in objs:
+        props = (o.get("info") or {}).get("props") or {}
+        if props.get("node.name") == NODE_NAME:
+            return True, props.get("rtp.receiving")
+    return False, None
+
+
+def current_sender():
+    r = subprocess.run(["nft", "-j", "list", "set", "inet", "filter", NFT_SET],
+                       text=True, capture_output=True)
+    if r.returncode != 0:
+        return None
+    try:
+        for item in json.loads(r.stdout).get("nftables", []):
+            elems = (item.get("set") or {}).get("elem") or []
+            for e in elems:
+                v = e.get("elem", {}).get("val") if isinstance(e, dict) else e
+                return str(v if v is not None else e)
+    except (ValueError, AttributeError):
+        return None
+    return ""
+
+
+def cmd_status(c):
+    cmd_check(c)
+    if c.uid is None:
+        return
+    r = systemctl_user(c, "is-active", UNIT)
+    print("  service     : %s" % (r.stdout.strip() or "inconnu"))
+    present, recv = receiving_state(c)
+    if present is None:
+        print("  PipeWire    : ne répond pas")
+    elif not present:
+        print("  flux        : absent")
+    else:
+        print("  flux        : %s" % ("en réception" if recv == "true" else "en attente d'un émetteur"))
+    s = current_sender()
+    if s is None:
+        print("  émetteur    : (pare-feu pi-server absent ou illisible)")
+    else:
+        print("  émetteur    : %s" % (s or "aucun (place libre)"))
+
+
+def main():
+    a = sys.argv[1:]
+    if not a or a[0] in ("-h", "--help", "help"):
+        head = open(__file__, encoding="utf-8").read().split("import configparser")[0]
+        print("\n".join(l[2:] for l in head.splitlines()[1:] if l.startswith("#") and "====" not in l))
+        return
+    c = Config()
+    if a[0] == "check":
+        cmd_check(c)
+    elif a[0] == "generate":
+        if len(a) < 2:
+            die("usage : rock-n-roll-pw-in generate DOSSIER")
+        cmd_generate(c, a[1])
+    elif a[0] == "apply":
+        cmd_apply(c)
+    elif a[0] == "status":
+        cmd_status(c)
+    else:
+        die("commande inconnue : %s" % a[0])
+
+
+if __name__ == "__main__":
+    main()
