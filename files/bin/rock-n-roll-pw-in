@@ -347,6 +347,11 @@ def cmd_apply(c):
             "plusieurs émetteurs pourraient se mélanger" % c.rtp["port"])
 
 
+def is_true(v):
+    """pw-dump écrit les propriétés « true » / « false » en booléens JSON"""
+    return v is True or str(v).strip().lower() == "true"
+
+
 def receiving_state(c):
     """(nœud présent ?, rtp.receiving) depuis pw-dump."""
     r = as_user(c, ["pw-dump"])
@@ -391,7 +396,7 @@ def cmd_status(c):
     elif not present:
         print("  flux        : absent")
     else:
-        print("  flux        : %s" % ("en réception" if recv == "true" else "en attente d'un émetteur"))
+        print("  flux        : %s" % ("en réception" if is_true(recv) else "en attente d'un émetteur"))
     s = current_sender()
     if s is None:
         print("  émetteur    : (pare-feu pi-server absent ou illisible)")

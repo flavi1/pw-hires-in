@@ -66,6 +66,15 @@ bad "option inconnue" rtp "portt = 46000"
 bad "section inconnue" roc "enabled = yes"
 cp "$HERE/pw-in.conf" "$W/conf/pw-in.conf"
 
+echo "== état du flux (pw-dump)"
+python3 - "$HERE/files/bin/rock-n-roll-pw-in" <<'PY' && ok "rtp.receiving : booléen JSON ou texte" || fail "is_true"
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("x", sys.argv[1])
+spec = importlib.util.spec_from_loader("x", loader); m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+assert m.is_true(True) and m.is_true("true")
+assert not m.is_true(False) and not m.is_true("false") and not m.is_true(None)
+PY
+
 if command -v spa-json-dump >/dev/null; then
     spa-json-dump "$PWC" >/dev/null && ok "SPA-JSON valide" || fail "SPA-JSON invalide"
 else
