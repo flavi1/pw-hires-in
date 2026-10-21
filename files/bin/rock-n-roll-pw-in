@@ -35,7 +35,7 @@ HEADER = ("# Généré par « rock-n-roll-pw-in apply » depuis %s\n"
           "# NE PAS ÉDITER : modifiez le fichier source puis relancez « sudo rock-n-roll-pw-in apply ».\n\n")
 
 DEFAULTS = {
-    "global": {"user": "auto", "target": "auto", "resample.quality": "auto"},
+    "global": {"user": "auto", "target": "auto", "resample.quality": "auto", "log-level": "2"},
     "rtp": {"enabled": "yes", "port": "46000", "latency-ms": "10", "rate": "192000",
             "format": "S24BE", "channels": "2", "release-seconds": "5",
             "description": "Réseau (RTP)"},
@@ -104,6 +104,9 @@ class Config:
             die("[rtp] rate doit valoir %s" % ", ".join(map(str, RATES)))
         if r["format"] not in FORMATS:
             die("[rtp] format doit valoir %s" % " ou ".join(FORMATS))
+        if g["log-level"] not in ("0", "1", "2", "3", "4", "5"):
+            die("[global] log-level doit être un entier de 0 à 5")
+        self.log_level = int(g["log-level"])
         if not q.isdigit() or not 0 <= int(q) <= 14:
             die("resample.quality doit être un entier de 0 à 14")
         self.quality = int(q)
@@ -152,7 +155,7 @@ def gen_pw_conf(c):
     """Configuration du processus PipeWire séparé qui héberge le récepteur RTP."""
     r = c.rtp
     doc = {
-        "context.properties": {"log.level": 0},
+        "context.properties": {"log.level": c.log_level},
         "context.spa-libs": {
             "audio.convert.*": "audioconvert/libspa-audioconvert",
             "support.*": "support/libspa-support",
