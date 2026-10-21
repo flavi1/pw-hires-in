@@ -49,6 +49,19 @@ Puis, sur le PC, voir [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll
 - Sans pare-feu pi-server, le port n'est pas filtré et rien n'empêche deux émetteurs
   de se mélanger (avertissement à l'installation).
 
+## Limitations connues
+
+- **Aucune perte de paquet n'est tolérée** : son sans compression ni correction
+  d'erreur, chaque paquet perdu (1 ms) provoque une resynchronisation, donc une
+  coupure. Diagnostic : `log-level = 3` dans `local.conf`, puis le journal (voir
+  Dépannage) affiche `unexpected seq` à chaque perte ; compter les paquets reçus
+  pendant la lecture (≈ 10 000 en 10 s attendus) :
+  `nstat -n >/dev/null; sleep 10; nstat UdpInDatagrams`.
+- **Économie d'énergie Ethernet (EEE) du PC** : cause fréquente de pertes (constaté :
+  carte Intel `e1000e` derrière une box SFR, ~13 % de paquets perdus). Remède côté
+  PC : README de [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll-pw-out),
+  « Couper l'EEE ».
+
 ## Configuration
 
 `/etc/rock-n-roll-pw-in/pw-in.conf` est **déployé depuis le dépôt** (l'ancien est gardé :
@@ -91,6 +104,7 @@ sudo rock-n-roll-pw-in status
 | Pas de son, `flux : en attente d'un émetteur` | côté PC, la sortie « Hifi — Ethernet » est-elle choisie ? Même port ? `sudo nft list set inet filter rnr_rtp_sender` : un autre PC tient la place ? |
 | `émetteur : 192.168.1.x` qui n'est pas le bon PC | l'autre PC envoie encore (même du silence) : arrêtez-le ou changez sa sortie ; la place se libère 5 s après |
 | PC sur un autre sous-réseau | `LAN4` de pi-server (`/etc/pi-server/pi-server.conf`) |
+| Coupures régulières, journal `unexpected seq` | paquets perdus avant la Pi : voir « Limitations connues » (EEE du PC, câble, box) |
 | Son haché | réseau chargé ou Wi-Fi : `latency-ms = 30` (ou plus) dans `local.conf`, puis `apply` |
 | Son trop aigu / grave, craquements réguliers | format différent des deux côtés : `rate` / `format` |
 | Journal | `sudo journalctl _UID=$(id -u hifi) --user-unit=rock-n-roll-rtp -f` |
