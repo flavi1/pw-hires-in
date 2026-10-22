@@ -12,7 +12,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CMD = os.path.join(HERE, "..", "files", "bin", "rock-n-roll-pw-in")
+CMD = os.path.join(HERE, "..", "files", "bin", "pw-hires-in")
 PORT = 46000
 RELEASE = 2
 
@@ -109,9 +109,9 @@ with tempfile.TemporaryDirectory() as w:
     time.sleep(RELEASE + 0.5)
     check(send("127.0.0.3") == "127.0.0.3", "place libérée %d s après le dernier paquet : 2e émetteur accepté" % RELEASE)
     check(send("127.0.0.2") is None, "l'ancien émetteur est refusé à son tour")
-    out = subprocess.run(["nft", "list", "set", "inet", "filter", "rnr_rtp_sender"],
+    out = subprocess.run(["nft", "list", "set", "inet", "filter", "pwh_sender"],
                          text=True, capture_output=True).stdout
-    check("127.0.0.3" in out, "émetteur en place visible (« rock-n-roll-pw-in status »)")
+    check("127.0.0.3" in out, "émetteur en place visible (« pw-hires-in status »)")
 
 print()
 print("%d échec(s)" % FAILS)

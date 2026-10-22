@@ -4,7 +4,7 @@
 # Usage : bash tests/test-config.sh
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CMD=(python3 "$HERE/files/bin/rock-n-roll-pw-in")
+CMD=(python3 "$HERE/files/bin/pw-hires-in")
 W="$(mktemp -d)"; trap 'rm -rf "$W"' EXIT
 FAILS=0
 ok()   { echo "  ok   : $*"; }
@@ -16,9 +16,9 @@ cp "$HERE/pw-in.conf" "$PW_IN_CONF"
 echo "== check / generate (sans pi-sound-server)"
 "${CMD[@]}" check >/dev/null && ok "check" || fail "check"
 "${CMD[@]}" generate "$W/gen" >/dev/null && ok "generate" || fail "generate"
-PWC="$W/gen/.config/pipewire/rock-n-roll-rtp.conf"
-UNIT="$W/gen/.config/systemd/user/rock-n-roll-rtp.service"
-NFT="$W/gen/nftables.d/30-rock-n-roll-pw-in.nft"
+PWC="$W/gen/.config/pipewire/pw-hires-rtp.conf"
+UNIT="$W/gen/.config/systemd/user/pw-hires-rtp.service"
+NFT="$W/gen/nftables.d/30-pw-hires-in.nft"
 for f in "$PWC" "$UNIT" "$NFT"; do [[ -s "$f" ]] && ok "${f#"$W"/gen/}" || fail "$f manquant"; done
 grep -q 'libpipewire-module-rtp-source' "$PWC" && ok "module rtp-source" || fail "rtp-source absent"
 grep -q 'source.port = 46000' "$PWC" && ok "port 46000" || fail "port"
@@ -29,7 +29,7 @@ grep -q 'sess.ignore-ssrc = true' "$PWC" && ok "nouveau flux du même émetteur 
 grep -q 'target.object = "MASTER"' "$PWC" && ok "vers MASTER" || fail "cible"
 grep -q 'log.level = 2' "$PWC" && ok "journal : avertissements" || fail "log.level"
 grep -q 'resample.quality = 10' "$PWC" && ok "qualité 10 (pi-sound-server par défaut)" || fail "qualité"
-grep -q 'ExecStart=/usr/bin/pipewire -c rock-n-roll-rtp.conf' "$UNIT" && ok "processus PipeWire séparé" || fail "ExecStart"
+grep -q 'ExecStart=/usr/bin/pipewire -c pw-hires-rtp.conf' "$UNIT" && ok "processus PipeWire séparé" || fail "ExecStart"
 grep -q 'size 1;' "$NFT" && grep -q 'timeout 5s' "$NFT" && ok "pare-feu : 1 place, libérée après 5 s" || fail "fragment nft"
 grep -q 'ip saddr $LAN4 udp dport 46000' "$NFT" && ok "pare-feu : réseau local seulement" || fail "LAN4"
 
@@ -41,7 +41,7 @@ master.name = SORTIE
 resample.quality = 12
 EOF
 PW_IN_SOUND_CONF="$W/sound.conf" "${CMD[@]}" generate "$W/gen2" >/dev/null
-G2="$W/gen2/.config/pipewire/rock-n-roll-rtp.conf"
+G2="$W/gen2/.config/pipewire/pw-hires-rtp.conf"
 grep -q 'target.object = "SORTIE"' "$G2" && ok "cible = master.name" || fail "master.name non repris"
 grep -q 'resample.quality = 12' "$G2" && ok "qualité reprise" || fail "qualité non reprise"
 PW_IN_SOUND_CONF="$W/sound.conf" "${CMD[@]}" check | grep -q 'utilisateur : musique' && ok "utilisateur repris" || fail "utilisateur"
@@ -49,8 +49,8 @@ PW_IN_SOUND_CONF="$W/sound.conf" "${CMD[@]}" check | grep -q 'utilisateur : musi
 echo "== local.conf"
 printf '[rtp]\nlatency-ms = 30\nrelease-seconds = 9\n' > "$W/conf/local.conf"
 "${CMD[@]}" generate "$W/gen3" >/dev/null
-grep -q 'sess.latency.msec = 30' "$W/gen3/.config/pipewire/rock-n-roll-rtp.conf" && ok "local.conf prioritaire" || fail "local.conf ignoré"
-grep -q 'timeout 9s' "$W/gen3/nftables.d/30-rock-n-roll-pw-in.nft" && ok "release-seconds -> délai du pare-feu" || fail "release-seconds"
+grep -q 'sess.latency.msec = 30' "$W/gen3/.config/pipewire/pw-hires-rtp.conf" && ok "local.conf prioritaire" || fail "local.conf ignoré"
+grep -q 'timeout 9s' "$W/gen3/nftables.d/30-pw-hires-in.nft" && ok "release-seconds -> délai du pare-feu" || fail "release-seconds"
 rm "$W/conf/local.conf"
 
 echo "== erreurs détectées"
@@ -68,7 +68,7 @@ bad "section inconnue" roc "enabled = yes"
 cp "$HERE/pw-in.conf" "$W/conf/pw-in.conf"
 
 echo "== état du flux (pw-dump)"
-python3 - "$HERE/files/bin/rock-n-roll-pw-in" <<'PY' && ok "rtp.receiving : booléen JSON ou texte" || fail "is_true"
+python3 - "$HERE/files/bin/pw-hires-in" <<'PY' && ok "rtp.receiving : booléen JSON ou texte" || fail "is_true"
 import importlib.machinery, importlib.util, sys
 loader = importlib.machinery.SourceFileLoader("x", sys.argv[1])
 spec = importlib.util.spec_from_loader("x", loader); m = importlib.util.module_from_spec(spec); loader.exec_module(m)

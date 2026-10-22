@@ -1,4 +1,4 @@
-# rock-n-roll-pw-in
+# pw-hires-in
 
 Réception, sur la Raspberry Pi, du son d'un PC par le réseau local, **sans perte et
 sans compression** : RTP, 192 kHz / 24 bits, tampon de 10 ms en Ethernet.
@@ -6,11 +6,11 @@ sans compression** : RTP, 192 kHz / 24 bits, tampon de 10 ms en Ethernet.
 Module de la famille [pi-server](https://github.com/flavi1/pi-server), à installer
 **après [pi-sound-server](https://github.com/flavi1/pi-sound-server)** : le son reçu
 entre dans `MASTER` comme n'importe quelle autre source (volume du knob, toutes les
-sorties). Côté PC : [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll-pw-out).
+sorties). Côté PC : [pw-hires-out](https://github.com/flavi1/pw-hires-out).
 
 ```
 PC (PipeWire)                         Raspberry Pi
- appli → « Hifi — Ethernet » ─RTP 192 kHz/24 bits─▶ rock-n-roll.rtp ─▶ MASTER ─▶ DAC / ampli
+ appli → « Hifi — Ethernet » ─RTP 192 kHz/24 bits─▶ pw-hires.rtp ─▶ MASTER ─▶ DAC / ampli
                          UDP 46000, réseau local
 ```
 
@@ -25,11 +25,16 @@ sudo pi-server add net
 Ou à la main :
 
 ```
-git clone https://github.com/flavi1/rock-n-roll-pw-in.git
-sudo bash rock-n-roll-pw-in/install.sh
+git clone https://github.com/flavi1/pw-hires-in.git
+sudo bash pw-hires-in/install.sh
 ```
 
-Puis, sur le PC, voir [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll-pw-out).
+Une ancienne installation rock-n-roll-pw-in est retirée automatiquement.
+
+Désinstallation : `sudo bash pw-hires-in/uninstall.sh` (`--purge` : aussi
+`/etc/pw-hires-in`), puis `sudo pi-server remove pw-hires-in` si installé par pi-server.
+
+Puis, sur le PC, voir [pw-hires-out](https://github.com/flavi1/pw-hires-out).
 
 ## Fonctionnement
 
@@ -42,7 +47,7 @@ Puis, sur le PC, voir [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll
   convertit ce qu'il joue vers 192 kHz (qualité PipeWire) ; la Pi n'a rien à
   renégocier.
 - Le récepteur tourne dans **son propre processus PipeWire** (service utilisateur
-  `rock-n-roll-rtp` de l'utilisateur `hifi`) : il peut être relancé sans toucher au
+  `pw-hires-rtp` de l'utilisateur `hifi`) : il peut être relancé sans toucher au
   reste (Mopidy, radios, Bluetooth continuent).
 - Les radios et la musique de Mopidy, le Bluetooth, la platine… restent utilisables en
   parallèle : tout se mélange dans `MASTER`.
@@ -59,17 +64,17 @@ Puis, sur le PC, voir [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll
   `nstat -n >/dev/null; sleep 10; nstat UdpInDatagrams`.
 - **Économie d'énergie Ethernet (EEE) du PC** : cause fréquente de pertes (constaté :
   carte Intel `e1000e` derrière une box SFR, ~13 % de paquets perdus). Remède côté
-  PC : README de [rock-n-roll-pw-out](https://github.com/flavi1/rock-n-roll-pw-out),
+  PC : README de [pw-hires-out](https://github.com/flavi1/pw-hires-out),
   « Couper l'EEE ».
 
 ## Configuration
 
-`/etc/rock-n-roll-pw-in/pw-in.conf` est **déployé depuis le dépôt** (l'ancien est gardé :
-`pw-in.conf.avant-maj`). Réglages propres à votre Pi : `/etc/rock-n-roll-pw-in/local.conf`
+`/etc/pw-hires-in/pw-in.conf` est **déployé depuis le dépôt** (l'ancien est gardé :
+`pw-in.conf.avant-maj`). Réglages propres à votre Pi : `/etc/pw-hires-in/local.conf`
 (mêmes sections, lu après, jamais écrasé). Après modification :
 
 ```
-sudo rock-n-roll-pw-in apply
+sudo pw-hires-in apply
 ```
 
 | Section | Clé | Défaut | Rôle |
@@ -87,7 +92,7 @@ sudo rock-n-roll-pw-in apply
 ## État
 
 ```
-sudo rock-n-roll-pw-in status
+sudo pw-hires-in status
 ```
 
 ```
@@ -101,13 +106,13 @@ sudo rock-n-roll-pw-in status
 
 | Symptôme | Piste |
 |---|---|
-| Pas de son, `flux : en attente d'un émetteur` | côté PC, la sortie « Hifi — Ethernet » est-elle choisie ? Même port ? `sudo nft list set inet filter rnr_rtp_sender` : un autre PC tient la place ? |
+| Pas de son, `flux : en attente d'un émetteur` | côté PC, la sortie « Hifi — Ethernet » est-elle choisie ? Même port ? `sudo nft list set inet filter pwh_sender` : un autre PC tient la place ? |
 | `émetteur : 192.168.1.x` qui n'est pas le bon PC | l'autre PC envoie encore (même du silence) : arrêtez-le ou changez sa sortie ; la place se libère 5 s après |
 | PC sur un autre sous-réseau | `LAN4` de pi-server (`/etc/pi-server/pi-server.conf`) |
 | Coupures régulières, journal `unexpected seq` | paquets perdus avant la Pi : voir « Limitations connues » (EEE du PC, câble, box) |
 | Son haché | réseau chargé ou Wi-Fi : `latency-ms = 30` (ou plus) dans `local.conf`, puis `apply` |
 | Son trop aigu / grave, craquements réguliers | format différent des deux côtés : `rate` / `format` |
-| Journal | `sudo journalctl _UID=$(id -u hifi) --user-unit=rock-n-roll-rtp -f` |
+| Journal | `sudo journalctl _UID=$(id -u hifi) --user-unit=pw-hires-rtp -f` |
 
 ## Tests
 

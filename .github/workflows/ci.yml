@@ -23,8 +23,8 @@ jobs:
           shellcheck -S warning install.sh tests/*.sh
       - name: Python (compilation + pyflakes)
         run: |
-          python3 -m py_compile files/bin/rock-n-roll-pw-in tests/test-firewall.py
-          pipx run pyflakes files/bin/rock-n-roll-pw-in tests/test-firewall.py
+          python3 -m py_compile files/bin/pw-hires-in tests/test-firewall.py
+          pipx run pyflakes files/bin/pw-hires-in tests/test-firewall.py
 
   config:
     name: Configuration et pare-feu
